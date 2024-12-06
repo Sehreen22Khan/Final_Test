@@ -14,7 +14,7 @@ phases:
     commands:
       - echo Build started on `date`
       - echo Building the backend Docker image...
-      - docker build -t $ENVIRONMENT_NAME-backend ./backend
+      - docker build -t $ENVIRONMENT_NAME-backend ./
       - docker tag $ENVIRONMENT_NAME-backend:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ENVIRONMENT_NAME-backend-repo:latest
   post_build:
     commands:
