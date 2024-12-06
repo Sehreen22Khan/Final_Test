@@ -7,7 +7,7 @@ Description: >
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: khan
     Description: "The environment name (e.g., dev, staging, prod)"
   VpcCIDR:
     Type: String
@@ -254,7 +254,9 @@ Resources:
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub "${EnvironmentName}-ecs-cluster"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ecs-cluster"
 
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
@@ -453,17 +455,17 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
 
-  # ECS Services
   BackendService:
     Type: AWS::ECS::Service
-    DependsOn: 
+    DependsOn:
       - ALBListener
+      - BackendListenerRule
     Properties:
       Cluster: !Ref ECSCluster
       ServiceName: !Sub "${EnvironmentName}-backend-service"
       TaskDefinition: !Ref BackendTaskDefinition
       LaunchType: FARGATE
-      DesiredCount: 2  # Set to 0 initially
+      DesiredCount: 2
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -484,7 +486,88 @@ Resources:
       LogGroupName: !Sub "/ecs/${EnvironmentName}-backend"
       RetentionInDays: 7
 
-  # CodeBuild Project
+  # Application Auto Scaling for the ECS Service
+  BackendServiceScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: BackendService
+    Properties:
+      MaxCapacity: 5
+      MinCapacity: 2
+      ResourceId: !Sub "service/${ECSCluster}/${EnvironmentName}-backend-service"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # High CPU Alarm (Scale Out)
+  BackendServiceHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-backend-high-cpu"
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Threshold: 90
+      Statistic: Average
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub "${EnvironmentName}-backend-service"
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      AlarmDescription: "Alarm if CPU > 90% for 2 minutes"
+      TreatMissingData: missing
+
+  BackendServiceScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-backend-scaleout-policy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref BackendServiceScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        StepAdjustments:
+          - ScalingAdjustment: 1
+            MetricIntervalLowerBound: 0
+        Cooldown: 60
+      Alarms:
+        - Ref: BackendServiceHighCPUAlarm
+
+  # Low CPU Alarm (Scale In)
+  BackendServiceLowCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-backend-low-cpu"
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Threshold: 50
+      Statistic: Average
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub "${EnvironmentName}-backend-service"
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      AlarmDescription: "Alarm if CPU < 50% for 2 minutes"
+      TreatMissingData: missing
+
+  BackendServiceScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-backend-scalein-policy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref BackendServiceScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        StepAdjustments:
+          - ScalingAdjustment: -1
+            MetricIntervalUpperBound: 0
+        Cooldown: 60
+      Alarms:
+        - Ref: BackendServiceLowCPUAlarm
+
+  # CodeBuild Project (assumes buildspec handles imagedefinitions.json)
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -496,16 +579,18 @@ Resources:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
         Image: aws/codebuild/standard:5.0
-        PrivilegedMode: true  # Required for Docker build
+        PrivilegedMode: true
         EnvironmentVariables:
           - Name: AWS_DEFAULT_REGION
             Value: !Ref AWS::Region
           - Name: ENVIRONMENT_NAME
             Value: !Ref EnvironmentName
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
       Source:
         Type: CODEPIPELINE
 
-  # CodePipeline Pipeline
+  # CodePipeline with Deploy Stage to ECS
   CodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -545,6 +630,21 @@ Resources:
                 ProjectName: !Ref CodeBuildProject
               OutputArtifacts:
                 - Name: BuildOutput
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: ECSDeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ClusterName: !Ref ECSCluster
+                ServiceName: !Ref BackendService
+                FileName: "imagedefinitions.json"
               RunOrder: 1
 
 Outputs:
