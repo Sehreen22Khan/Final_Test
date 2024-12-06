@@ -395,6 +395,18 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-alb"
 
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-backend-tg"
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: '/health'
+      Matcher:
+        HttpCode: '200-399'
+
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -416,18 +428,6 @@ Resources:
       Actions:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
-
-  BackendTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Sub "${EnvironmentName}-backend-tg"
-      Port: 5000
-      Protocol: HTTP
-      VpcId: !Ref VPC
-      TargetType: ip
-      HealthCheckPath: '/health'
-      Matcher:
-        HttpCode: '200-399'
 
   # ECS Task Definitions
   BackendTaskDefinition:
@@ -456,6 +456,8 @@ Resources:
   # ECS Services
   BackendService:
     Type: AWS::ECS::Service
+    DependsOn: 
+      - ALBListener
     Properties:
       Cluster: !Ref ECSCluster
       ServiceName: !Sub "${EnvironmentName}-backend-service"
